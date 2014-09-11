@@ -160,7 +160,9 @@ class SGD(object):
         self.prev_batch = None
 
     def __call__(self):
+        df_st = time.time()
         batch = self.data.next()
+        df_et = time.time()
         assert batch
 
         # Perturb the data (! and the model)
@@ -194,8 +196,9 @@ class SGD(object):
             for dx, prop in enumerate(self.prop_names):
                 msg += ' '+prop+' %.2e'
                 vals += [float(numpy.array(rvals[dx]))]
-            msg += ' step time %s whole time %s lr %.2e'
-            vals += [print_time(g_ed - g_st),
+            msg += ' dload %s step time %s whole time %s lr %.2e'
+            vals += [print_time(df_et-df_st),
+                     print_time(g_ed - g_st),
                      print_time(time.time() - self.step_timer),
                      float(self.lr)]
             print msg % tuple(vals)
