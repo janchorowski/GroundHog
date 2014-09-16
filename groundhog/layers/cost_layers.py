@@ -1143,19 +1143,22 @@ class SoftmaxLayer(CostLayer):
 
         if sum_over_time is None:
             sum_over_time = self.sum_over_time
+        
         if sum_over_time:
-            if state_below.ndim == 3:
-                cost = cost.reshape((state_below.shape[0],
-                                     state_below.shape[1]))
-                self.cost = cost.mean(1).sum()
-            else:
-                self.cost = cost.sum()
+            self.cost = cost.sum()
+            if target_ndim == 2:
+                self.cost /= target_shape[1]
         else:
             self.cost = cost.mean()
         if scale:
             self.cost = self.cost*scale
+        
         if reg:
+            self.properties.append(('unreg_cost', self.cost))
+            self.properties.append(('reg_cost', reg))
             self.cost = self.cost + reg
+            self.properties.append(('tot_cost', self.cost))
         self.mask = mask
         self.cost_scale = scale
+        self.cost.name='cost_%s' % (self.name, )
         return self.cost

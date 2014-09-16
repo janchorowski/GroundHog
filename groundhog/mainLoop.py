@@ -250,7 +250,7 @@ class MainLoop(object):
             print 'mainLoop: Corrupted model file'
             traceback.print_exc()
         try:
-            self.timings = dict(numpy.load(timings_path).iteritems())
+            self.timings.update(dict(numpy.load(timings_path).iteritems()))
         except Exception:
             print 'mainLoop: Corrupted timings file'
             traceback.print_exc()
@@ -314,16 +314,17 @@ class MainLoop(object):
                    self.step % self.state['validFreq'] == 0 and\
                    self.step > 1:
                     valcost = self.validate()
-                    if valcost > self.old_cost * self.state['cost_threshold']:
-                        self.patience -= 1
-                        if 'lr_start' in self.state and\
-                           self.state['lr_start'] == 'on_error':
-                                self.state['lr_start'] = self.step
-                    elif valcost < self.old_cost:
-                        self.patience = self.state['patience']
-                        self.old_cost = valcost
+                    if 'cost_threshold' in self.state:
+                        if valcost > self.old_cost * self.state['cost_threshold']:
+                            self.patience -= 1
+                            if 'lr_start' in self.state and\
+                               self.state['lr_start'] == 'on_error':
+                                    self.state['lr_start'] = self.step
+                        elif valcost < self.old_cost:
+                            self.patience = self.state['patience']
+                            self.old_cost = valcost
 
-                    if self.state['divide_lr'] and \
+                    if self.state.get('divide_lr',None) and \
                        self.patience < 1:
                         # Divide lr by 2
                         self.algo.lr = self.algo.lr / self.state['divide_lr']

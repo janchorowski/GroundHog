@@ -47,7 +47,9 @@ class SGD(object):
             state['adarho'] = 0.96
         if 'adaeps' not in state:
             state['adaeps'] = 1e-6
-
+        if 'profile' not in state:
+            state['profile'] = 0
+        
         #####################################
         # Step 0. Constructs shared variables
         #####################################
@@ -77,14 +79,12 @@ class SGD(object):
                                                 dtype=x.dtype),
                                     name=x.name) for x in model.inputs]
 
-	if 'profile' not in self.state:
-            self.state['profile'] = 0
-
         ###################################
         # Step 1. Compile training function
         ###################################
         logger.debug('Constructing grad function')
         loc_data = self.gdata
+        
         self.prop_exprs = [x[1] for x in model.properties]
         self.prop_names = [x[0] for x in model.properties]
         self.update_rules = [x[1] for x in model.updates]
@@ -97,9 +97,12 @@ class SGD(object):
         gs = rval[:nparams]
         rules = rval[nparams:nparams + nrules]
         outs = rval[nparams + nrules:]
-
-        norm_gs = TT.sqrt(sum(TT.sum(x**2)
-            for x,p in zip(gs, self.model.params) if p not in self.model.exclude_params_for_norm))
+        
+        if 'grad_norm' in self.prop_names:
+            norm_gs = self.prop_exprs[self.prop_names.index('grad_norm')]
+        else:
+            norm_gs = TT.sqrt(sum(TT.sum(x**2)
+                for x,p in zip(gs, model.params) if p not in model.exclude_params_for_norm))
         if 'cutoff' in state and state['cutoff'] > 0:
             c = numpy.float32(state['cutoff'])
             if state['cutoff_rescale_length']:
