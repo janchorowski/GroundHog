@@ -158,6 +158,7 @@ class MainLoop(object):
     def validate(self):
         rvals = self.model.validate(self.valid_data)
         msg = '**  %d     validation:' % self.valid_id
+        print_mem('validate')
         self.valid_id += 1
         self.batch_start_time = time.time()
         pos = self.step // self.state['validFreq']
@@ -190,6 +191,12 @@ class MainLoop(object):
             self.state['bstep'] = int(self.step)
             self.state['btime'] = int(time.time() - self.start_time)
             self.test()
+        elif numpy.random.rand(1) > self.state['rand_test_inclusion']:
+            print 'Shouldn''t test, but you got lucky', cost, '>', self.state['bvalidcost']
+            for k, v in self.state.items():
+                if 'test' in k:
+                    print k, v
+            self.test()
         else:
             print 'No testing', cost, '>', self.state['bvalidcost']
             for k, v in self.state.items():
@@ -203,7 +210,11 @@ class MainLoop(object):
     def test(self):
         self.model.best_params = [(x.name, x.get_value()) for x in
                                   self.model.params]
-        numpy.savez(self.state['prefix'] + '_best_params',
+        if self.state.get('best_overwrite',True):
+            best_file_name = self.state['prefix'] + '_best_params'
+        else:
+            best_file_name = self.state['prefix'] + '_best_params_%d' %(self.step,) 
+        numpy.savez(best_file_name,
                     **dict(self.model.best_params))
         self.state['best_params_pos'] = self.step
         if self.test_data is not None:

@@ -172,7 +172,7 @@ class SR_Model(Model):
 
     def validate(self, data_iterator, train=False):
         data_iterator.reset()
-        
+        import gc
         if self.valid_step is None:
             logger.debug('Compiling validation funcion')
             tot_batch_cost = self.cost_layer.cost_per_sample.sum() 
@@ -196,7 +196,13 @@ class SR_Model(Model):
             n_expls += y_mask.shape[1]
             n_words += y_mask.sum()
             cost += self.valid_step( **vals)
-            
+        
+        #ugly hack to prevent out-of memory errors
+        self.valid_step = None
+        
+        gc.collect()
+        gc.collect()
+        gc.collect()
         return [('log_p_expl', cost / n_expls ),
                 ('log_p_word', cost / n_words )
                 ]
