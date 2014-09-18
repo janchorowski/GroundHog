@@ -85,10 +85,22 @@ class SGD(object):
         logger.debug('Constructing grad function')
         loc_data = self.gdata
         
+        model_grads = model.param_grads
+        
+        self.lr = numpy.float32(self.state.get('lr',1.0))
+        
+        scaled_grads = [g*self.lr for g in model_grads]
+        
+        norm_gs = TT.sqrt(sum(TT.sum(x**2)
+                for x,p in zip(scaled_grads, model.params) if p not in model.exclude_params_for_norm))
+        norm_gs.name='scaled_grad_norm'
+        
+        model.properties.append( ('scaled_grad_norm', norm_gs) )
+        
         self.prop_exprs = [x[1] for x in model.properties]
         self.prop_names = [x[0] for x in model.properties]
         self.update_rules = [x[1] for x in model.updates]
-        rval = theano.clone(model.param_grads + self.update_rules + \
+        rval = theano.clone(scaled_grads + self.update_rules + \
                             self.prop_exprs + [model.train_cost],
                             replace=zip(model.inputs, loc_data))
         nparams = len(model.params)
@@ -98,11 +110,9 @@ class SGD(object):
         rules = rval[nparams:nparams + nrules]
         outs = rval[nparams + nrules:]
         
-        if 'grad_norm' in self.prop_names:
-            norm_gs = self.prop_exprs[self.prop_names.index('grad_norm')]
-        else:
-            norm_gs = TT.sqrt(sum(TT.sum(x**2)
-                for x,p in zip(gs, model.params) if p not in model.exclude_params_for_norm))
+        norm_gs = outs[-2] #outs[-1] is cost, outs[-2] is the last model property, or scaled_grad_norm
+        
+        
         if 'cutoff' in state and state['cutoff'] > 0:
             c = numpy.float32(state['cutoff'])
             if state['cutoff_rescale_length']:
@@ -136,7 +146,6 @@ class SGD(object):
             givens = zip(model.inputs, loc_data))
         logger.debug('took {}'.format(time.time() - st))
 
-        self.lr = numpy.float32(1.)
         new_params = [p - (TT.sqrt(dn2 + eps) / TT.sqrt(gn2 + eps)) * g
                 for p, g, gn2, dn2 in
                 zip(model.params, self.gs, self.gnorm2, self.dnorm2)]
