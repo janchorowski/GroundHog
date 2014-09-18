@@ -146,6 +146,7 @@ class CostLayer(Layer):
         self.additional_inputs = additional_inputs
         self.use_nce = use_nce
         self._init_params()
+        self.skip_grads_hack=False
 
     def _init_params(self):
         """
@@ -375,6 +376,11 @@ class CostLayer(Layer):
                              use_noise=use_noise,
                              additional_inputs=additional_inputs,
                              no_noise_bias=no_noise_bias)
+        if self.skip_grads_hack:
+            logger.debug("Skipping grad computation. What a hack!")
+            self.grads = []
+            return cost,[]
+        
         logger.debug("Get grads")
         grads = TT.grad(cost.mean(), self.params)
         logger.debug("Got grads")
