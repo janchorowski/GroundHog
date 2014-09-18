@@ -143,7 +143,8 @@ class SGD(object):
                 if p not in self.model.exclude_params_for_norm:
                     tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
                     _gs.append(
-                       TT.switch(notfinite, numpy.float32(.1)*p, tmpg))
+                       #TT.switch(notfinite, numpy.float32(.1)*p, tmpg))
+                       TT.switch(notfinite, numpy.float32(0.0)*p, tmpg))
                 else:
                     _gs.append(g)
             gs = _gs
