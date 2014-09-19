@@ -89,7 +89,7 @@ class SGD(object):
         
         #do the weight decay
         logger.info('Computing weight decay')
-        wdec_cost = numpy.float32(0.0)
+        wdec_cost = None
         matched_params = set()
         for p in model.params:
             for param_name_pattern, wd in state['weight_decay_rules']:
@@ -98,23 +98,28 @@ class SGD(object):
                         logger.warn('multiple weight decay rules match: %s', p.name)
                     matched_params.add(p)
                     logger.info('Decaying %s by %s', p.name, wd)
-                    wdec_cost = wdec_cost + (p**2).sum() * wd
-        
-        wdec_grad = theano.grad(wdec_cost, model.params, disconnected_inputs='ignore')
-        
-        tot_grad = [wg+mg for wg,mg in zip(wdec_grad, model.param_grads)]
+                    if wdec_cost is None:
+                        wdec_cost =  (p**2).sum() * wd
+                    else:
+                        wdec_cost = wdec_cost + (p**2).sum() * wd
+
+        if wdec_cost is not None:
+            wdec_grad = theano.grad(wdec_cost, model.params, disconnected_inputs='ignore')
+            tot_grad = [wg+mg for wg,mg in zip(wdec_grad, model.param_grads)]
+            model.properties.append(('wdec_cost', wdec_cost))
+        else:
+            tot_grad = model.param_grads
                 
         self.lr = numpy.float32(self.state.get('lr',1.0))
+        
         
         scaled_grads = [g*self.lr for g in tot_grad]
         
         norm_gs = TT.sqrt(sum(TT.sum(x**2)
-                for x,p in zip(scaled_grads, model.params) if p not in model.exclude_params_for_norm))
+                for x,p in zip(scaled_grads, model.params) if p not in model.exclude_params_for_norm))        
         norm_gs.name='scaled_grad_norm'
         
-        model.properties.extend([ ('wdec_cost', wdec_cost), 
-                                  ('scaled_grad_norm', norm_gs) 
-                                ])
+        model.properties.append(('scaled_grad_norm', norm_gs))
         
         self.prop_exprs = [x[1] for x in model.properties]
         self.prop_names = [x[0] for x in model.properties]
