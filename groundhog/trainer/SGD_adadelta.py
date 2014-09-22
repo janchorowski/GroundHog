@@ -81,6 +81,20 @@ class SGD(object):
                                                 dtype=x.dtype),
                                     name=x.name) for x in model.inputs]
 
+        self.lr = theano.shared(numpy.float32(state['lr']), name='lr')
+
+        if state['cutoff_adapt']:
+            #start these at zero, since the initial cutoff is 1 and scaled gradient norm is max 1
+            self.gnorm_log_ave = theano.shared( numpy.float32(0), name='gnorm_log_ave')
+            #nasty init trick to have a low stdev at the beginning
+            self.gnorm_log2_ave = theano.shared( numpy.float32(0), name='gnorm_log2_ave' )
+            self.gnorm_log2_ave_gater = theano.shared( numpy.float32(0), name='gnorm_log2_ave_gater' )
+            self.cutoff = theano.shared( numpy.float32(state['cutoff'], name='cutoff') )
+            logger.debug("Will use adaptive cutoff computation")
+        else:
+            self.cutoff = theano.shared( numpy.float32(state['cutoff'], name='cutoff') )
+            
+
         ###################################
         # Step 1. Compile training function
         ###################################
@@ -110,9 +124,6 @@ class SGD(object):
         else:
             tot_grad = model.param_grads
                 
-        self.lr = numpy.float32(self.state.get('lr',1.0))
-        
-        
         scaled_grads = [g*self.lr for g in tot_grad]
         
         norm_gs = TT.sqrt(sum(TT.sum(x**2)
@@ -135,10 +146,8 @@ class SGD(object):
         outs = rval[nparams + nrules:]
         
         norm_gs = outs[-2] #outs[-1] is cost, outs[-2] is the last model property, or scaled_grad_norm
-        
-        
         if 'cutoff' in state and state['cutoff'] > 0:
-            c = numpy.float32(state['cutoff'])
+            c = self.cutoff
             if state['cutoff_rescale_length']:
                 c = c * TT.cast(loc_data[0].shape[0], 'float32')
 
@@ -158,6 +167,32 @@ class SGD(object):
 
         rho = self.state['adarho']
         eps = self.state['adaeps']
+        
+        if state['cutoff_adapt']:
+            cut_rho = self.state['cutoff_rho']
+            gnorm_log = TT.log(norm_gs)
+            gnorm_log_ave_up = (cut_rho*self.gnorm_log_ave + 
+                                numpy.float32(1.-cut_rho) * gnorm_log)
+            gnorm_log2_ave_up = (cut_rho*self.gnorm_log2_ave + 
+                                 numpy.float32(1.-cut_rho) * gnorm_log**2)         
+            cutoff_up = TT.exp(gnorm_log_ave_up +
+                               self.gnorm_log2_ave_gater * 
+                               TT.sqrt(TT.maximum(numpy.float32(0.0),
+                                                  gnorm_log2_ave_up - gnorm_log_ave_up**2
+                                              )
+                                   ) * numpy.float32(state['cutoff_stdevs'])  
+                           )
+            #the idea is that only when we have a decent estimate of the stdew the gater will be 1 as they have the same decay constant
+            gnorm_log2_ave_gater_up = TT.cast((cut_rho*self.gnorm_log2_ave_gater + (1.-cut_rho)*numpy.float32(1.0)), theano.config.floatX)
+            if 1:
+                cutoff_up = TT.minimum(numpy.float32(state['cutoff_max']),
+                                       (cut_rho*self.cutoff + (1.-cut_rho) * cutoff_up
+                                        ))
+                     
+            updates  = updates + [(self.gnorm_log_ave, TT.switch(notfinite, self.gnorm_log_ave, gnorm_log_ave_up)),
+                                  (self.gnorm_log2_ave, TT.switch(notfinite, self.gnorm_log2_ave, gnorm_log2_ave_up)),
+                                  (self.cutoff, TT.switch(notfinite, self.cutoff, cutoff_up)),
+                                  (self.gnorm_log2_ave_gater, gnorm_log2_ave_gater_up)]
 
         # grad2
         gnorm2_up = [rho * gn2 + (1. - rho) * (g ** 2.) for gn2,g in zip(self.gnorm2, gs)]
@@ -193,7 +228,8 @@ class SGD(object):
                 ['cost',
                         'error',
                         'time_step',
-                        'whole_time', 'lr']
+                        'whole_time', 'lr', 
+                'cutoff']
         self.prev_batch = None
 
     def __call__(self):
@@ -218,12 +254,14 @@ class SGD(object):
                 gdata.set_value(data, borrow=True)
         # Run the trianing function
         g_st = time.time()
+        lr_val = self.lr.get_value()
+        cutoff_val = self.cutoff.get_value()
         rvals = self.train_fn()
         for schedule in self.schedules:
             schedule(self, rvals[-1])
         self.update_fn()
         g_ed = time.time()
-        self.state['lr'] = float(self.lr)
+        self.state['lr'] = lr_val
         cost = rvals[-1]
         self.old_cost = cost
         whole_time = time.time() - self.step_timer
@@ -233,16 +271,17 @@ class SGD(object):
             for dx, prop in enumerate(self.prop_names):
                 msg += ' '+prop+' %.2e'
                 vals += [float(numpy.array(rvals[dx]))]
-            msg += ' dload %s step time %s whole time %s lr %.2e'
+            msg += ' dload %s step time %s whole time %s lr %.2e co %.2e'
             vals += [print_time(df_et-df_st),
                      print_time(g_ed - g_st),
                      print_time(time.time() - self.step_timer),
-                     float(self.lr)]
+                     lr_val, cutoff_val]
             print msg % tuple(vals)
         self.step += 1
         ret = dict([('cost', float(cost)),
                     ('error', float(cost)),
-                       ('lr', float(self.lr)),
+                       ('lr', lr_val),
+                       ('cutoff', cutoff_val),
                        ('time_step', float(g_ed - g_st)),
                        ('whole_time', float(whole_time))]+zip(self.prop_names, rvals))
         return ret
