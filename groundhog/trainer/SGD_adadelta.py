@@ -89,7 +89,9 @@ class SGD(object):
             #nasty init trick to have a low stdev at the beginning
             self.gnorm_log2_ave = theano.shared( numpy.float32(0), name='gnorm_log2_ave' )
             self.gnorm_log2_ave_gater = theano.shared( numpy.float32(0), name='gnorm_log2_ave_gater' )
-            self.cutoff = theano.shared( numpy.float32(state['cutoff'], name='cutoff') )
+            self.cutoff_adapt_steps = theano.shared( numpy.float32(0), name='cutoff_adapt_steps' )
+            self.cutoff = theano.shared( numpy.float32(state['cutoff']), name='cutoff' )
+            self.cutoff_level = theano.shared( numpy.float32(state['cutoff']), name='cutoff_level' )
             logger.debug("Will use adaptive cutoff computation")
         else:
             self.cutoff = theano.shared( numpy.float32(state['cutoff'], name='cutoff') )
@@ -132,7 +134,10 @@ class SGD(object):
             _gs = []
             for g,p in zip(gs,self.model.params):
                 if p not in self.model.exclude_params_for_norm:
-                    tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
+                    if state['cutoff_adapt']:
+                        tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
+                    else:
+                        tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
                     _gs.append(
                        TT.switch(notfinite, numpy.float32(.1)*p, tmpg))
                        #TT.switch(notfinite, numpy.float32(0.0)*p, tmpg))
@@ -146,30 +151,50 @@ class SGD(object):
         eps = self.state['adaeps']
         
         if state['cutoff_adapt']:
-            cut_rho = self.state['cutoff_rho']
+            cut_adapt_step_up = self.cutoff_adapt_steps + 1.0
+            #quickly fill the running averages
+            
+            cut_rho_mean = TT.minimum(numpy.float32(self.state['cutoff_rho']), 
+                                 self.cutoff_adapt_steps/cut_adapt_step_up)
+            cut_rho_mean2= numpy.float32(self.state['cutoff_rho'])
             gnorm_log = TT.log(norm_gs)
-            gnorm_log_ave_up = (cut_rho*self.gnorm_log_ave + 
-                                numpy.float32(1.-cut_rho) * gnorm_log)
-            gnorm_log2_ave_up = (cut_rho*self.gnorm_log2_ave + 
-                                 numpy.float32(1.-cut_rho) * gnorm_log**2)         
+            #here we quiclky converge the mean
+            gnorm_log_ave_up = (cut_rho_mean*self.gnorm_log_ave + 
+                                (numpy.float32(1.)-cut_rho_mean) * gnorm_log)
+            #this can wait as it starts from 0 anyways!
+            gnorm_log2_ave_up = (cut_rho_mean2*self.gnorm_log2_ave + 
+                                 (numpy.float32(1.)-cut_rho_mean2) * gnorm_log**2)         
+            
             cutoff_up = TT.exp(gnorm_log_ave_up +
-                               self.gnorm_log2_ave_gater * 
+                               #self.gnorm_log2_ave_gater * 
                                TT.sqrt(TT.maximum(numpy.float32(0.0),
                                                   gnorm_log2_ave_up - gnorm_log_ave_up**2
                                               )
                                    ) * numpy.float32(state['cutoff_stdevs'])  
                            )
+            if state['cutoff_to_mean']:
+                cutoff_level_up = TT.exp(gnorm_log_ave_up)
+            else:
+                cutoff_level_up = cutoff_up
             #the idea is that only when we have a decent estimate of the stdew the gater will be 1 as they have the same decay constant
-            gnorm_log2_ave_gater_up = TT.cast((cut_rho*self.gnorm_log2_ave_gater + (1.-cut_rho)*numpy.float32(1.0)), theano.config.floatX)
-            if 1:
+            gnorm_log2_ave_gater_up = TT.cast((cut_rho_mean2*self.gnorm_log2_ave_gater + (1.-cut_rho_mean2)*numpy.float32(1.0)), theano.config.floatX)
+            
+            if 0:
                 cutoff_up = TT.minimum(numpy.float32(state['cutoff_max']),
-                                       (cut_rho*self.cutoff + (1.-cut_rho) * cutoff_up
+                                       (cut_rho_mean2*self.cutoff + (1.-cut_rho_mean2) * cutoff_up
                                         ))
-                     
+            
+            if state['cutoff_to_mean']:
+                cutoff_level_up = TT.exp(gnorm_log_ave_up)
+            else:
+                cutoff_level_up = cutoff_up
+            
             updates  = updates + [(self.gnorm_log_ave, TT.switch(notfinite, self.gnorm_log_ave, gnorm_log_ave_up)),
                                   (self.gnorm_log2_ave, TT.switch(notfinite, self.gnorm_log2_ave, gnorm_log2_ave_up)),
                                   (self.cutoff, TT.switch(notfinite, self.cutoff, cutoff_up)),
-                                  (self.gnorm_log2_ave_gater, gnorm_log2_ave_gater_up)]
+                                  (self.gnorm_log2_ave_gater, gnorm_log2_ave_gater_up),
+                                  (self.cutoff_level, TT.switch(notfinite, self.cutoff_level, cutoff_level_up)),
+                                  (self.cutoff_adapt_steps, cut_adapt_step_up)]
 
         # grad2
         gnorm2_up = [rho * gn2 + (1. - rho) * (g ** 2.) for gn2,g in zip(self.gnorm2, gs)]
@@ -255,6 +280,7 @@ class SGD(object):
                      lr_val, cutoff_val]
             print msg % tuple(vals)
         self.step += 1
+        print 'gn_log_ave ' , self.gnorm_log_ave.get_value(), ' gn_log2_ave ', self.gnorm_log2_ave.get_value(), ' gs ', self.cutoff_adapt_steps.get_value()
         ret = dict([('cost', float(cost)),
                     ('error', float(cost)),
                        ('lr', lr_val),
