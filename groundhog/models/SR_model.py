@@ -14,6 +14,7 @@ __contact__ = "Razvan Pascanu <r.pascanu@gmail>"
 import numpy
 import itertools
 import logging
+import re
 
 import cPickle as pkl
 
@@ -40,6 +41,7 @@ class SR_Model(Model):
                   indx_word_src=None,
                   character_level = False,
                   exclude_params_for_norm=None,
+                  state=None,
                   rng = None):
         """
         Constructs a model, that respects the interface required by the
@@ -114,7 +116,8 @@ class SR_Model(Model):
         self.clean_before = clean_before_noise_fn
         self.weight_noise_amount = weight_noise_amount
         self.character_level = character_level
-
+        self.state = state
+        
         self.valid_costs = ['log_p_expl','log_p_word']
         # Assume a single cost
         # We need to merge these lists
@@ -123,6 +126,29 @@ class SR_Model(Model):
             num_words = TT.sum(self.cost_layer.mask)
         else:
             num_words = TT.cast(state_below.shape[0], 'float32')
+        
+        #do the weight decay
+        logger.info('Computing weight decay')
+        wdec_cost = None
+        matched_params = set()
+        for p in self.params:
+            for param_name_pattern, wd in state['weight_decay_rules']:
+                if re.match(param_name_pattern, p.name):
+                    if p in matched_params:
+                        logger.warn('multiple weight decay rules match: %s', p.name)
+                    matched_params.add(p)
+                    logger.info('Decaying %s by %s', p.name, wd)
+                    if wdec_cost is None:
+                        wdec_cost =  (p**2).sum() * wd
+                    else:
+                        wdec_cost = wdec_cost + (p**2).sum() * wd
+
+        if wdec_cost is not None:
+            self.properties.append(('wdec_cost', wdec_cost))
+            self.train_cost = self.train_cost + wdec_cost
+            self.properties.append(('tot_cost', self.train_cost))
+            wdec_grad = theano.grad(wdec_cost, self.params, disconnected_inputs='ignore')
+            self.param_grads = [wg+mg for wg,mg in zip(wdec_grad, self.param_grads)]
         
         grad_norm = TT.sqrt(sum(TT.sum(x**2)
             for x,p in zip(self.param_grads, self.params) if p not in
