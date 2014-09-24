@@ -280,7 +280,8 @@ class SGD(object):
                      lr_val, cutoff_val]
             print msg % tuple(vals)
         self.step += 1
-        print 'gn_log_ave ' , self.gnorm_log_ave.get_value(), ' gn_log2_ave ', self.gnorm_log2_ave.get_value(), ' gs ', self.cutoff_adapt_steps.get_value()
+        if state['cutoff_adapt']:
+            print 'gn_log_ave ' , self.gnorm_log_ave.get_value(), ' gn_log2_ave ', self.gnorm_log2_ave.get_value(), ' gs ', self.cutoff_adapt_steps.get_value()
         ret = dict([('cost', float(cost)),
                     ('error', float(cost)),
                        ('lr', lr_val),

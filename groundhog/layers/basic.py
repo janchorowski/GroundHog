@@ -213,6 +213,8 @@ class Layer(Container):
         return new_obj
 
     shape = property(lambda self: self.out.shape)
+    
+    ndim = property(lambda self: self.out.ndim)
 
     def __str__(self):
         return self.name
