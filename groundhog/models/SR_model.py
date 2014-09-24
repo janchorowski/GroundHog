@@ -196,6 +196,24 @@ class SR_Model(Model):
         
         self.valid_step = None
 
+    def censor_updates(self, updates):
+        clipped_updates = []
+        matched_params = set()
+        for u in updates:
+            p, p_up = u
+            new_up = p_up
+            for param_name_pattern, param_clip in self.state['weight_column_norm_clip_rules']:
+                if re.match(param_name_pattern, p.name):
+                    if p in matched_params:
+                        logger.warn('multiple weight decay rules match: %s', p.name)
+                    matched_params.add(p)
+                    logger.info('Clipping columns of %s to %s', p.name, param_clip)
+                    p_col_norms = TT.sqrt(TT.sum(TT.sqr(p_up), axis=0))
+                    desired_norms = TT.clip(p_col_norms, 0, param_clip)
+                    new_up = p_up * (desired_norms / (1e-7 + p_col_norms))
+            clipped_updates.append((p,new_up))
+        return clipped_updates
+
     def validate(self, data_iterator, train=False):
         data_iterator.reset()
         import gc

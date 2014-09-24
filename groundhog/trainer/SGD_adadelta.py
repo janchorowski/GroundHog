@@ -211,8 +211,11 @@ class SGD(object):
         new_params = [p - (TT.sqrt(dn2 + eps) / TT.sqrt(gn2 + eps)) * g
                 for p, g, gn2, dn2 in
                 zip(model.params, self.gs, self.gnorm2, self.dnorm2)]
-
+        
         updates = zip(model.params, new_params)
+        
+        updates = model.censor_updates(updates)         
+        
         # d2
         d2_up = [(dn2, rho * dn2 + (1. - rho) *
             (((TT.sqrt(dn2 + eps) / TT.sqrt(gn2 + eps)) * g) ** 2.))
