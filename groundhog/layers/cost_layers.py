@@ -1152,7 +1152,7 @@ class SoftmaxLayer(CostLayer):
         
         if sum_over_time:
             self.cost = cost.sum()
-            if target_ndim == 2:
+            if target_ndim == 2 and getattr(self,'normalize_by_batch_size',True):
                 self.cost /= target_shape[1]
         else:
             self.cost = cost.mean()

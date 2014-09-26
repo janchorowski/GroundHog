@@ -42,6 +42,7 @@ class SR_Model(Model):
                   character_level = False,
                   exclude_params_for_norm=None,
                   state=None,
+                  rnnencdec=None,
                   rng = None):
         """
         Constructs a model, that respects the interface required by the
@@ -117,6 +118,7 @@ class SR_Model(Model):
         self.weight_noise_amount = weight_noise_amount
         self.character_level = character_level
         self.state = state
+        self.rnnencdec = rnnencdec
         
         self.valid_costs = ['log_p_expl','log_p_word']
         # Assume a single cost
@@ -144,6 +146,13 @@ class SR_Model(Model):
                         wdec_cost = wdec_cost + (p**2).sum() * wd
 
         if wdec_cost is not None:
+            if self.state['normalize_by_batch_size']==False:
+                in_names = [inp.name for inp in self.output_layer.inputs]
+                y = self.output_layer.inputs[in_names.index('y')]
+                assert y.name=='y'
+                if y.ndim==2:
+                    wdec_cost = wdec_cost *  y.shape[1]
+                batch_size =  y.shape[1]
             self.properties.append(('wdec_cost', wdec_cost))
             self.train_cost = self.train_cost + wdec_cost
             self.properties.append(('tot_cost', self.train_cost))
@@ -163,6 +172,8 @@ class SR_Model(Model):
                 ('log_p_expl', per_expl_cost ),          
                 ('log2_p_word', per_word_cost / numpy.float32(numpy.log(2))),
                 ('log2_p_expl', per_expl_cost / numpy.float32(numpy.log(2)))]
+        if self.state['normalize_by_batch_size']==False:
+            new_properties.append(('bs', batch_size))
         self.properties += new_properties
 
         if len(self.noise_params) >0 and weight_noise_amount:
@@ -195,6 +206,7 @@ class SR_Model(Model):
             self.del_noise = None
         
         self.valid_step = None
+        self.valid_tot_batch_cost = None
 
     def censor_updates(self, updates):
         clipped_updates = []
@@ -219,11 +231,31 @@ class SR_Model(Model):
         import gc
         if self.valid_step is None:
             logger.debug('Compiling validation funcion')
-            tot_batch_cost = self.cost_layer.cost_per_sample.sum() 
+            if self.valid_tot_batch_cost is None:
+                tot_batch_cost = self.cost_layer.cost_per_sample.sum()
+                if hasattr(self.rnnencdec, 'clean_trans_x'):
+                    #Dropout - replace trans_x with cleran_trans_x
+                    trans_x = self.rnnencdec.trans_x
+                    if hasattr(trans_x, 'out'):
+                        trans_x = trans_x.out
+                    clean_trans_x = self.rnnencdec.clean_trans_x
+                    if hasattr(clean_trans_x, 'out'):
+                        clean_trans_x = clean_trans_x.out
+                        
+                    tot_batch_cost = theano.clone(tot_batch_cost, 
+                                                  replace={trans_x: clean_trans_x}, 
+                                                  share_inputs=True)
+                self.valid_tot_batch_cost = tot_batch_cost
+                         
             self.valid_step = theano.function(inputs=self.inputs, 
-                                              outputs=tot_batch_cost, 
+                                              outputs=self.valid_tot_batch_cost, 
                                               no_default_updates=True
                                               )
+        
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        
         cost = 0
         n_expls = 0
         n_words = 0
