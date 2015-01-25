@@ -274,7 +274,7 @@ class SR_Model(Model):
             cost += self.valid_step( **vals)
         
         #ugly hack to prevent out-of memory errors
-        self.valid_step = None
+        #self.valid_step = None
         
         gc.collect()
         gc.collect()
