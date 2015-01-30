@@ -152,7 +152,10 @@ class SGD(object):
             for g,p in zip(gs,self.model.params):
                 if p not in self.model.exclude_params_for_norm:
                     if state['cutoff_adapt']:
-                        tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
+                        if state.get('fix_cutoff_bug', False):
+                            tmpg = TT.switch(TT.ge(norm_gs, c), g*self.cutoff_level/norm_gs, g)
+                        else:
+                            tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
                     else:
                         tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
                     _gs.append(

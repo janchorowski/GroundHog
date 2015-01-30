@@ -105,8 +105,20 @@ class SGD(object):
                 
         scaled_grads = [g*self.lr for g in model.param_grads]
         
-        norm_gs = TT.sqrt(sum(TT.sum(x**2)
-                for x,p in zip(scaled_grads, model.params) if p not in model.exclude_params_for_norm))        
+        sum_grad_norms = 0.0
+        for scaled_grad,p in zip(scaled_grads, model.params): 
+            if p in model.exclude_params_for_norm:
+                continue
+            scaled_grad_norm = TT.sum(scaled_grad**2)
+            if self.state.get('monitor_grad_param_magnitudes'):
+                scaled_grad_norm.name = p.name + '_grad_norm'
+                model.properties.append((scaled_grad_norm.name, scaled_grad_norm))
+                param_norm = TT.sum(p**2)
+                param_norm.name = p.name + '_param_norm'
+                model.properties.append((param_norm.name, param_norm))
+            sum_grad_norms += scaled_grad_norm
+        
+        norm_gs = TT.sqrt(sum_grad_norms)        
         norm_gs.name='scaled_grad_norm'
         
         model.properties.append(('scaled_grad_norm', norm_gs))
@@ -135,7 +147,10 @@ class SGD(object):
             for g,p in zip(gs,self.model.params):
                 if p not in self.model.exclude_params_for_norm:
                     if state['cutoff_adapt']:
-                        tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
+                        if state.get('fix_cutoff_bug', False):
+                            tmpg = TT.switch(TT.ge(norm_gs, c), g*self.cutoff_level/norm_gs, g)
+                        else:
+                            tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
                     else:
                         tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
                     _gs.append(
@@ -183,11 +198,6 @@ class SGD(object):
                 cutoff_up = TT.minimum(numpy.float32(state['cutoff_max']),
                                        (cut_rho_mean2*self.cutoff + (1.-cut_rho_mean2) * cutoff_up
                                         ))
-            
-            if state['cutoff_to_mean']:
-                cutoff_level_up = TT.exp(gnorm_log_ave_up)
-            else:
-                cutoff_level_up = cutoff_up
             
             updates  = updates + [(self.gnorm_log_ave, TT.switch(notfinite, self.gnorm_log_ave, gnorm_log_ave_up)),
                                   (self.gnorm_log2_ave, TT.switch(notfinite, self.gnorm_log2_ave, gnorm_log2_ave_up)),

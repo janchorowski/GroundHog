@@ -131,19 +131,18 @@ class SR_Model(Model):
         
         #do the weight decay
         logger.info('Computing weight decay')
-        wdec_cost = None
-        matched_params = set()
+        matched_params = {}
         for p in self.params:
             for param_name_pattern, wd in state['weight_decay_rules']:
                 if re.match(param_name_pattern, p.name):
                     if p in matched_params:
                         logger.warn('multiple weight decay rules match: %s', p.name)
-                    matched_params.add(p)
                     logger.info('Decaying %s by %s', p.name, wd)
-                    if wdec_cost is None:
-                        wdec_cost =  (p**2).sum() * wd
-                    else:
-                        wdec_cost = wdec_cost + (p**2).sum() * wd
+                    matched_params[p] = (p**2).sum() * wd
+        if matched_params:
+            wdec_cost = sum(matched_params.values())
+        else:
+            wdec_cost = None
 
         if wdec_cost is not None:
             if self.state['normalize_by_batch_size']==False:
@@ -210,19 +209,28 @@ class SR_Model(Model):
 
     def censor_updates(self, updates):
         clipped_updates = []
-        matched_params = set()
         for u in updates:
             p, p_up = u
             new_up = p_up
+            matched = False
             for param_name_pattern, param_clip in self.state['weight_column_norm_clip_rules']:
                 if re.match(param_name_pattern, p.name):
-                    if p in matched_params:
-                        logger.warn('multiple weight decay rules match: %s', p.name)
-                    matched_params.add(p)
+                    if matched:
+                        logger.warn('multiple column norm clip rules match: %s', p.name)
+                    matched=True
                     logger.info('Clipping columns of %s to %s', p.name, param_clip)
-                    p_col_norms = TT.sqrt(TT.sum(TT.sqr(p_up), axis=0))
-                    desired_norms = TT.clip(p_col_norms, 0, param_clip)
-                    new_up = p_up * (desired_norms / (1e-7 + p_col_norms))
+                    if param_clip is None:
+                        new_up = p_up
+                    else:
+                        p_col_norms = TT.sqrt(TT.sum(TT.sqr(p_up), axis=0))
+                        desired_norms = TT.clip(p_col_norms, 0, param_clip)
+                        new_up = p_up * (desired_norms / (1e-7 + p_col_norms))
+            
+            #todo make generic    
+            if self.state.get('enc_freeze_approx_embdr') and re.match('.*enc_approx_emb.*', p.name):
+                logger.info('Freezinf %s', p.name)
+                new_up = p
+                    
             clipped_updates.append((p,new_up))
         return clipped_updates
 
