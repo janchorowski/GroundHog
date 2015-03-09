@@ -1159,11 +1159,18 @@ class SoftmaxLayer(CostLayer):
         if scale:
             self.cost = self.cost*scale
         
-        if reg:
+        if reg is not None:
+            if not isinstance(reg, (tuple,list)):
+                reg = [('reg_cost', reg)]
+            
             self.properties.append(('unreg_cost', self.cost))
-            self.properties.append(('reg_cost', reg))
-            self.cost = self.cost + reg
+            
+            for reg_name, reg_val in reg:    
+                self.properties.append((reg_name, reg_val))
+                self.cost = self.cost + reg_val
+            
             self.properties.append(('tot_cost', self.cost))
+            
         self.mask = mask
         self.cost_scale = scale
         self.cost.name='cost_%s' % (self.name, )

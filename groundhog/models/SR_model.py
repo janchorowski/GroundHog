@@ -4,6 +4,7 @@ Implementation of a language model class.
 
 TODO: write more documentation
 """
+from collections import OrderedDict
 __docformat__ = 'restructedtext en'
 __authors__ = ("Razvan Pascanu "
                "KyungHyun Cho "
@@ -21,6 +22,7 @@ import cPickle as pkl
 import theano
 import theano.tensor as TT
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+#from theano.tensor.shared_randomstreams import RandomStreams
 
 from groundhog.utils import id_generator
 from groundhog.layers.basic import Model
@@ -119,8 +121,13 @@ class SR_Model(Model):
         self.character_level = character_level
         self.state = state
         self.rnnencdec = rnnencdec
-        
+    
         self.valid_costs = ['log_p_expl','log_p_word']
+        
+        for prop in self.cost_layer.properties:
+            if prop[0][:4] == 'ali_':
+                self.valid_costs.append(prop[0])
+        
         # Assume a single cost
         # We need to merge these lists
         state_below = self.cost_layer.state_below
@@ -214,7 +221,7 @@ class SR_Model(Model):
             new_up = p_up
             matched = False
             for param_name_pattern, param_clip in self.state['weight_column_norm_clip_rules']:
-                if re.match(param_name_pattern, p.name):
+                if re.match(param_name_pattern, p.name) and not p.name.endswith('__ls2'):
                     if matched:
                         logger.warn('multiple column norm clip rules match: %s', p.name)
                     matched=True
@@ -241,6 +248,14 @@ class SR_Model(Model):
             logger.debug('Compiling validation funcion')
             if self.valid_tot_batch_cost is None:
                 tot_batch_cost = self.cost_layer.cost_per_sample.sum()
+                extra_costs = []
+                for prop in self.cost_layer.properties:
+                    if prop[0][:4] == 'ali_':
+                        extra_costs.append(prop)
+                
+                self.valid_extra_cost_names =  [p[0] for p in extra_costs]
+                costs = [tot_batch_cost] + [p[1].sum() for p in extra_costs]
+                
                 if hasattr(self.rnnencdec, 'clean_trans_x'):
                     #Dropout - replace trans_x with cleran_trans_x
                     trans_x = self.rnnencdec.trans_x
@@ -249,11 +264,12 @@ class SR_Model(Model):
                     clean_trans_x = self.rnnencdec.clean_trans_x
                     if hasattr(clean_trans_x, 'out'):
                         clean_trans_x = clean_trans_x.out
-                        
-                    tot_batch_cost = theano.clone(tot_batch_cost, 
+                    
+                    costs = theano.clone(costs, 
                                                   replace={trans_x: clean_trans_x}, 
                                                   share_inputs=True)
-                self.valid_tot_batch_cost = tot_batch_cost
+                self.valid_tot_batch_cost = costs
+                
                          
             self.valid_step = theano.function(inputs=self.inputs, 
                                               outputs=self.valid_tot_batch_cost, 
@@ -264,7 +280,7 @@ class SR_Model(Model):
         gc.collect()
         gc.collect()
         
-        cost = 0
+        costs = [0.0] * len(self.valid_tot_batch_cost)
         n_expls = 0
         n_words = 0
                 
@@ -279,17 +295,28 @@ class SR_Model(Model):
             y_mask = vals['y_mask']
             n_expls += y_mask.shape[1]
             n_words += y_mask.sum()
-            cost += self.valid_step( **vals)
-        
+            batch_costs = self.valid_step( **vals)
+            for i in xrange(len(batch_costs)):
+                if i==0 or not self.state['normalize_by_batch_size']:
+                    costs[i] += batch_costs[i]
+                else:
+                    costs[i] += batch_costs[i]*y_mask.shape[1]
+                    
         #ugly hack to prevent out-of memory errors
         #self.valid_step = None
+        print 'did %d utts with %d words' %(n_expls, n_words)
+        gc.collect()
+        gc.collect()
+        gc.collect()
         
-        gc.collect()
-        gc.collect()
-        gc.collect()
-        return [('log_p_expl', cost / n_expls ),
-                ('log_p_word', cost / n_words )
+        ret = [('log_p_expl', costs[0] / n_expls ),
+                ('log_p_word', costs[0] / n_words )
                 ]
+        
+        for ec_name, ec_val in zip(self.valid_extra_cost_names, costs[1:]):
+            ret.append((ec_name, ec_val/n_expls))
+        
+        return ret
 
     def load_dict(self, opts):
         """
@@ -312,7 +339,97 @@ class SR_Model(Model):
         elif self.indx_word_src and '.np' in self.indx_word_src[-4:]:
             self.word_indxs_src = numpy.load(self.indx_word_src)['unique_words']
 
-
+    
+    def add_variational_noise(self):
+        init_sigma = self.state['init_sigma']
+        
+        N = numpy.float32(self.state['Num_train_examples'])
+        model_cost_coeff = numpy.float32(self.state.get('model_cost', 1.0))
+        assert N>0
+        
+        theano_rng = RandomStreams(self.state['seed'])
+        
+        P_noisy = self.params
+        P_clean = []
+        
+        Beta = []
+        P_with_noise = []
+        for p in P_noisy:
+            p_u = p
+            p_val = p.get_value(borrow=True)
+            p_ls2 = theano.shared((numpy.zeros_like(p_val) + numpy.log(init_sigma)/2.).astype(dtype=numpy.float32), name='%s__ls2' % (p.name,))
+            p_s2 = TT.exp(p_ls2)
+            Beta.append((p_u, p_ls2, p_s2))
+            #p_noisy = theano_rng.normal(size=p_val.shape, avg=p_u, std=TT.sqrt(p_s2), dtype='float32')
+            #p_noisy = p_u + TT.ones_like(p_u)*0.001
+            p_noisy = p_u + theano_rng.normal(size=p_val.shape)*TT.exp(p_ls2/2.0)
+            p_noisy = TT.patternbroadcast(p_noisy, p.type.broadcastable)
+            P_with_noise.append(p_noisy)
+        
+        #compute the prior mean and variation
+        temp_sum = 0.0
+        temp_param_count = 0.0
+        for p_u,unused_p_ls2,unused_p_s2 in Beta:
+            temp_sum = temp_sum + p_u.sum()
+            temp_param_count = temp_param_count + p_u.shape.prod()
+            
+        prior_u = TT.cast(temp_sum/temp_param_count, 'float32')
+        
+        temp_sum = 0.0
+        for p_u,unused_ls2,p_s2 in Beta:
+            temp_sum = temp_sum + (p_s2**2).sum() + (((p_u-prior_u)**2).sum())
+        
+        prior_s2 = TT.cast(temp_sum/temp_param_count, 'float32')
+        
+        #convert everything to use the noisy parameters
+        assert not self.updates #what to do with this
+        f_properties = [p for p in self.properties if p[0] != 'grad_norm']
+        
+        to_convert = [self.train_cost] + self.param_grads + [fp[1] for fp in f_properties]
+        converted = theano.clone(to_convert, replace=zip(P_noisy, P_with_noise))
+        
+        LC = 0.0
+        for p_u,unused_ls2,p_s2 in Beta:
+            LC = LC + 0.5*TT.log(prior_s2 / p_s2).sum() + 1.0 / (2.0 * prior_s2) * (((p_u-prior_u)**2).sum() + p_s2.sum() - prior_s2)
+            
+        LC = LC/N * model_cost_coeff
+        
+        self.train_cost = converted[0] + LC
+        
+        converted_grads = converted[1:len(self.param_grads)+1]
+        converted_props = zip([fp[0] for fp in f_properties], converted[len(self.param_grads)+1:])
+        converted_grads_dict = dict(zip(self.params, converted_grads))
+        
+        new_params = list(P_clean)
+        new_grads = [converted_grads_dict[p] for p in new_params]
+        
+        assert self.state['bs'] == 1 #we need \sum_bach dLdW**2, but the best we can easily 
+                                     #get is (\sum_bach dLdW)**2. They are equal when bs==1
+        for p_u,p_ls2,p_s2 in Beta:
+            p_grad = converted_grads_dict[p_u]
+            p_u_grad = model_cost_coeff * (p_u - prior_u) / (N*prior_s2) + p_grad
+            p_s2_grad = numpy.float32(model_cost_coeff * 0.5/N) * (1.0/prior_s2 + 1.0/p_s2) + 0.5 * p_grad**2 #figure a fix for bs>1
+            
+            p_ls2_grad = p_s2 * p_s2_grad
+          
+            new_params.append(p_u)
+            new_params.append(p_ls2)
+            new_grads.append(p_u_grad)
+            new_grads.append(p_ls2_grad)
+        
+        self.params = new_params
+        self.param_grads = new_grads
+        
+        grad_norm = TT.sqrt(sum(TT.sum(x**2)
+            for x,p in zip(self.param_grads, self.params) if p not in
+                self.exclude_params_for_norm))
+        
+        self.properties = [('grad_norm', grad_norm)] + converted_props
+        self.properties.append(('LC', LC))
+        self.properties.append(('prior_u',prior_u))
+        self.properties.append(('prior_s2',prior_s2))
+        
+            
 
     def get_samples(self, length = 30, temp=1, *inps):
         if not hasattr(self, 'word_indxs'):
