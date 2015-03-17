@@ -347,6 +347,8 @@ class SR_Model(Model):
         model_cost_coeff = numpy.float32(self.state.get('model_cost', 1.0))
         assert N>0
         
+        log_sigma_scale=2048.0
+        
         theano_rng = RandomStreams(self.state['seed'])
         
         P_noisy = self.params
@@ -354,15 +356,16 @@ class SR_Model(Model):
         
         Beta = []
         P_with_noise = []
+        
         for p in P_noisy:
             p_u = p
             p_val = p.get_value(borrow=True)
-            p_ls2 = theano.shared((numpy.zeros_like(p_val) + numpy.log(init_sigma)/2.).astype(dtype=numpy.float32), name='%s__ls2' % (p.name,))
-            p_s2 = TT.exp(p_ls2)
+            p_ls2 = theano.shared((numpy.zeros_like(p_val) + numpy.log(init_sigma)*2./log_sigma_scale).astype(dtype=numpy.float32), name='%s__ls2' % (p.name,))
+            p_s2 = TT.exp(p_ls2*log_sigma_scale)
             Beta.append((p_u, p_ls2, p_s2))
             #p_noisy = theano_rng.normal(size=p_val.shape, avg=p_u, std=TT.sqrt(p_s2), dtype='float32')
             #p_noisy = p_u + TT.ones_like(p_u)*0.001
-            p_noisy = p_u + theano_rng.normal(size=p_val.shape)*TT.exp(p_ls2/2.0)
+            p_noisy = p_u + theano_rng.normal(size=p_val.shape)*TT.sqrt(p_s2)
             p_noisy = TT.patternbroadcast(p_noisy, p.type.broadcastable)
             P_with_noise.append(p_noisy)
         
@@ -377,7 +380,7 @@ class SR_Model(Model):
         
         temp_sum = 0.0
         for p_u,unused_ls2,p_s2 in Beta:
-            temp_sum = temp_sum + (p_s2**2).sum() + (((p_u-prior_u)**2).sum())
+            temp_sum = temp_sum + (p_s2).sum() + (((p_u-prior_u)**2).sum())
         
         prior_s2 = TT.cast(temp_sum/temp_param_count, 'float32')
         
@@ -389,8 +392,8 @@ class SR_Model(Model):
         converted = theano.clone(to_convert, replace=zip(P_noisy, P_with_noise))
         
         LC = 0.0
-        for p_u,unused_ls2,p_s2 in Beta:
-            LC = LC + 0.5*TT.log(prior_s2 / p_s2).sum() + 1.0 / (2.0 * prior_s2) * (((p_u-prior_u)**2).sum() + p_s2.sum() - prior_s2)
+        for p_u,p_ls2,p_s2 in Beta:
+            LC = LC + 0.5*((TT.log(prior_s2) - p_ls2*log_sigma_scale).sum()) + 1.0 / (2.0 * prior_s2) * (((p_u-prior_u)**2) + p_s2 - prior_s2).sum()
             
         LC = LC/N * model_cost_coeff
         
@@ -408,10 +411,8 @@ class SR_Model(Model):
         for p_u,p_ls2,p_s2 in Beta:
             p_grad = converted_grads_dict[p_u]
             p_u_grad = model_cost_coeff * (p_u - prior_u) / (N*prior_s2) + p_grad
-            p_s2_grad = numpy.float32(model_cost_coeff * 0.5/N) * (1.0/prior_s2 + 1.0/p_s2) + 0.5 * p_grad**2 #figure a fix for bs>1
+            p_ls2_grad = numpy.float32(model_cost_coeff * 0.5/N * log_sigma_scale) * (p_s2/prior_s2 - 1.0) + (0.5*log_sigma_scale) * p_s2 * p_grad**2 #figure a fix for bs>1
             
-            p_ls2_grad = p_s2 * p_s2_grad
-          
             new_params.append(p_u)
             new_params.append(p_ls2)
             new_grads.append(p_u_grad)
