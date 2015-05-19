@@ -51,6 +51,14 @@ class SGD(object):
             state['adaeps'] = 1e-6
         if 'profile' not in state:
             state['profile'] = 0
+            
+        if state['cutoff_adapt']:
+            if 'cutoff_to_mean' not in state:
+                state['cutoff_to_mean'] = True
+            if 'cutoff_stdevs' not in state:
+                state['cutoff_stdevs'] = 4.0
+            if 'cutoff_rho' not in state:
+                state['cutoff_rho'] = 0.99
         
         #####################################
         # Step 0. Constructs shared variables
@@ -83,6 +91,9 @@ class SGD(object):
 
         self.lr = theano.shared(numpy.float32(state['lr']), name='lr')
 
+        self.burn_in_steps = self.state.get('burn_in_steps',0)
+        if self.burn_in_steps < 0:
+            self.burn_in_steps = numpy.ceil(1.0/(1.0-self.state['adarho']))
         if state['cutoff_adapt']:
             #start these at zero, since the initial cutoff is 1 and scaled gradient norm is max 1
             self.gnorm_log_ave = theano.shared( numpy.float32(0), name='gnorm_log_ave')
@@ -95,6 +106,7 @@ class SGD(object):
             logger.debug("Will use adaptive cutoff computation")
         else:
             self.cutoff = theano.shared( numpy.float32(state['cutoff'], name='cutoff') )
+            self.cutoff_level = self.cutoff
             
 
         ###################################
@@ -146,13 +158,7 @@ class SGD(object):
             _gs = []
             for g,p in zip(gs,self.model.params):
                 if p not in self.model.exclude_params_for_norm:
-                    if state['cutoff_adapt']:
-                        if state.get('fix_cutoff_bug', False):
-                            tmpg = TT.switch(TT.ge(norm_gs, c), g*self.cutoff_level/norm_gs, g)
-                        else:
-                            tmpg = TT.switch(TT.ge(norm_gs, self.cutoff_level), g*c/norm_gs, g)
-                    else:
-                        tmpg = TT.switch(TT.ge(norm_gs, c), g*c/norm_gs, g)
+                    tmpg = TT.switch(TT.ge(norm_gs, c), g*self.cutoff_level/norm_gs, g)
                     _gs.append(
                        TT.switch(notfinite, numpy.float32(.1)*p, tmpg))
                        #TT.switch(notfinite, numpy.float32(0.0)*p, tmpg))
@@ -171,7 +177,10 @@ class SGD(object):
             
             cut_rho_mean = TT.minimum(numpy.float32(self.state['cutoff_rho']), 
                                  self.cutoff_adapt_steps/cut_adapt_step_up)
-            cut_rho_mean2= numpy.float32(self.state['cutoff_rho'])
+            if self.burn_in_steps > 0: #if we do the burn in, take the fast converging mean
+                cut_rho_mean2= cut_rho_mean
+            else: #else start from 0
+                cut_rho_mean2= numpy.float32(self.state['cutoff_rho'])
             gnorm_log = TT.log(norm_gs)
             #here we quiclky converge the mean
             gnorm_log_ave_up = (cut_rho_mean*self.gnorm_log_ave + 
@@ -195,6 +204,7 @@ class SGD(object):
             gnorm_log2_ave_gater_up = TT.cast((cut_rho_mean2*self.gnorm_log2_ave_gater + (1.-cut_rho_mean2)*numpy.float32(1.0)), theano.config.floatX)
             
             if 0:
+                logger.warn("Not enforcing cutoff max value!")
                 cutoff_up = TT.minimum(numpy.float32(state['cutoff_max']),
                                        (cut_rho_mean2*self.cutoff + (1.-cut_rho_mean2) * cutoff_up
                                         ))
@@ -222,20 +232,26 @@ class SGD(object):
                 for p, g, gn2, dn2 in
                 zip(model.params, self.gs, self.gnorm2, self.dnorm2)]
         
-        updates = zip(model.params, new_params)
+        model_updates = zip(model.params, new_params)
         
-        updates = model.censor_updates(updates)         
+        model_updates = model.censor_updates(model_updates)         
         
         # d2
         d2_up = [(dn2, rho * dn2 + (1. - rho) *
             (((TT.sqrt(dn2 + eps) / TT.sqrt(gn2 + eps)) * g) ** 2.))
             for dn2, gn2, g in zip(self.dnorm2, self.gnorm2, self.gs)]
-        updates = updates + d2_up
 
         self.update_fn = theano.function(
             [], [], name='update_function',
             allow_input_downcast=True,
-            updates = updates)
+            updates = model_updates + d2_up)
+        
+        #during burn in we don't update the parameters and don't adapt the cutoff.
+        self.burn_in_fn = theano.function(
+            [], [], name='burn_in_function',
+            allow_input_downcast=True,
+            updates = d2_up + [(self.cutoff, self.state['cutoff'])])
+        
 
         self.old_cost = 1e20
         self.schedules = model.get_schedules()
@@ -274,9 +290,16 @@ class SGD(object):
         rvals = self.train_fn()
         for schedule in self.schedules:
             schedule(self, rvals[-1])
-        self.update_fn()
+        if self.burn_in_steps >= 0:
+            print '.. burn in to go: %d ' %(self.burn_in_steps,),
+            self.burn_in_steps -= 1
+            self.burn_in_fn()
+        else:
+            self.update_fn()
+
         g_ed = time.time()
         self.state['lr'] = lr_val
+        self.state['cutoff'] = cutoff_val
         cost = rvals[-1]
         self.old_cost = cost
         whole_time = time.time() - self.step_timer

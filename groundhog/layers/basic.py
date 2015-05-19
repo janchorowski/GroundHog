@@ -184,7 +184,7 @@ class Container(object):
         unknown = set(vals.keys()) - {p.name for p in self.params}
         if len(unknown):
             logger.error("Unknown parameters {} given".format(unknown))
-
+        
 class Layer(Container):
     """
     Parent class for Layers.
@@ -216,8 +216,18 @@ class Layer(Container):
     
     ndim = property(lambda self: self.out.ndim)
 
-    def __str__(self):
-        return self.name
+    def __repr__(self, *args, **kwargs):
+        if not hasattr(self, 'out'):
+            return '%s(%s)' % (self.name, str(self.__class__))
+        else:
+            return 'Evaluated %s(%s) with out=%s' %(self.name, str(self.__class__), repr(self.out))
+        
+    def __str__(self, *args, **kwargs):
+        if not hasattr(self, 'out'):
+            return  '%s(%s)' % (self.name, str(self.__class__))
+        else:
+            return 'Evaluated %s(%s) with out=%s' %(self.name, str(self.__class__), str(self.out))
+
 
     def __add__(self, other):
         assert hasattr(self, 'out'), 'all layers need a default output'

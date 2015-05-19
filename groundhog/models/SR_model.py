@@ -127,6 +127,11 @@ class SR_Model(Model):
         for prop in self.cost_layer.properties:
             if prop[0][:4] == 'ali_':
                 self.valid_costs.append(prop[0])
+                
+        if self.rnnencdec.decoder.transitions[0].alignment_window:
+            new_names = ['win_log_p_exlp']
+            new_names.extend('win_' + n for n in self.valid_costs[2:])
+            self.valid_costs.extend(new_names)
         
         # Assume a single cost
         # We need to merge these lists
@@ -255,6 +260,25 @@ class SR_Model(Model):
                 
                 self.valid_extra_cost_names =  [p[0] for p in extra_costs]
                 costs = [tot_batch_cost] + [p[1].sum() for p in extra_costs]
+                normalize_costs = [not self.state['normalize_by_batch_size']] * len(costs)
+                normalize_costs[0] = True
+                #
+                # Note: do this first, before replacing trans_x in the acoustic layers
+                # so that the later replacement also works
+                #
+                search_layer = self.rnnencdec.decoder.transitions[0]
+                if search_layer.alignment_window:
+                    logger.debug('Removing alignment windowing in validation funcion!')
+                    orig_costs = costs
+                    costs = theano.clone(orig_costs, 
+                                         replace=search_layer.alignment_window_disable_replacements,
+                                         share_inputs=True)
+                    costs.extend(orig_costs)
+                    new_names = ['win_log_p_exlp']
+                    new_names.extend('win_' + n for n in self.valid_extra_cost_names)
+                    self.valid_extra_cost_names.extend(new_names)
+                    normalize_costs.extend(normalize_costs)
+                
                 
                 if hasattr(self.rnnencdec, 'clean_trans_x'):
                     #Dropout - replace trans_x with cleran_trans_x
@@ -269,16 +293,12 @@ class SR_Model(Model):
                                                   replace={trans_x: clean_trans_x}, 
                                                   share_inputs=True)
                 self.valid_tot_batch_cost = costs
-                
+                self.normalize_costs = normalize_costs
                          
             self.valid_step = theano.function(inputs=self.inputs, 
                                               outputs=self.valid_tot_batch_cost, 
                                               no_default_updates=True
                                               )
-        
-        gc.collect()
-        gc.collect()
-        gc.collect()
         
         costs = [0.0] * len(self.valid_tot_batch_cost)
         n_expls = 0
@@ -296,8 +316,9 @@ class SR_Model(Model):
             n_expls += y_mask.shape[1]
             n_words += y_mask.sum()
             batch_costs = self.valid_step( **vals)
+            #rint batch_costs
             for i in xrange(len(batch_costs)):
-                if i==0 or not self.state['normalize_by_batch_size']:
+                if self.normalize_costs[i]: #i==0 or not self.state['normalize_by_batch_size']:
                     costs[i] += batch_costs[i]
                 else:
                     costs[i] += batch_costs[i]*y_mask.shape[1]
@@ -305,9 +326,7 @@ class SR_Model(Model):
         #ugly hack to prevent out-of memory errors
         #self.valid_step = None
         print 'did %d utts with %d words' %(n_expls, n_words)
-        gc.collect()
-        gc.collect()
-        gc.collect()
+
         
         ret = [('log_p_expl', costs[0] / n_expls ),
                 ('log_p_word', costs[0] / n_words )
@@ -404,14 +423,25 @@ class SR_Model(Model):
         converted_grads_dict = dict(zip(self.params, converted_grads))
         
         new_params = list(P_clean)
-        new_grads = [converted_grads_dict[p] for p in new_params]
+        new_grads = [converted_grads_dict.pop(p) for p in new_params]
         
-        assert self.state['bs'] == 1 #we need \sum_bach dLdW**2, but the best we can easily 
+        #assert self.state['bs'] == 1 #we need \sum_bach dLdW**2, but the best we can easily 
                                      #get is (\sum_bach dLdW)**2. They are equal when bs==1
+        if self.state['bs']==1:
+            diag_hessian_estimate = {p:g**2 for p,g in converted_grads_dict.iteritems()}
+        else:
+            if self.state['variational_use_grad_squared']: #naive way
+                #this underestimates the hessian...
+                diag_hessian_estimate = {p:g**2 for p,g in converted_grads_dict.iteritems()}
+            else:
+                diag_hessian_estimate = {p:g**2 for p,g in converted_grads_dict.iteritems()}
+            
         for p_u,p_ls2,p_s2 in Beta:
             p_grad = converted_grads_dict[p_u]
             p_u_grad = model_cost_coeff * (p_u - prior_u) / (N*prior_s2) + p_grad
-            p_ls2_grad = numpy.float32(model_cost_coeff * 0.5/N * log_sigma_scale) * (p_s2/prior_s2 - 1.0) + (0.5*log_sigma_scale) * p_s2 * p_grad**2 #figure a fix for bs>1
+            
+            p_ls2_grad = (numpy.float32(model_cost_coeff * 0.5/N * log_sigma_scale) * (p_s2/prior_s2 - 1.0) + 
+                          (0.5*log_sigma_scale) * p_s2 * diag_hessian_estimate[p_u])
             
             new_params.append(p_u)
             new_params.append(p_ls2)
@@ -430,7 +460,35 @@ class SR_Model(Model):
         self.properties.append(('prior_u',prior_u))
         self.properties.append(('prior_s2',prior_s2))
         
-            
+        
+    def add_fixed_noise(self):
+        theano_rng = RandomStreams(self.state['seed'])
+        
+        param_replace = {}
+        for p in self.params:
+            for param_name_pattern, sigma in self.state['weight_noise_rules']:
+                if re.match(param_name_pattern, p.name):
+                    if p in param_replace:
+                        logger.warn('multiple weight noise rules match: %s', p.name)
+                    logger.info('Adding noise to %s with sigma %s', p.name, sigma)
+                    p_noisy = p + theano_rng.normal(size=p.get_value().shape)*sigma
+                    p_noisy = TT.patternbroadcast(p_noisy, p.type.broadcastable)
+                    param_replace[p] = p_noisy
+        
+        #convert everything to use the noisy parameters
+        assert not self.updates #what to do with this
+        properties = self.properties
+        
+        to_convert = [self.train_cost] + self.param_grads + [fp[1] for fp in properties]
+        converted = theano.clone(to_convert, replace=param_replace)
+        
+        self.train_cost = converted[0]
+        
+        converted_grads = converted[1:len(self.param_grads)+1]
+        converted_props = zip([fp[0] for fp in properties], converted[len(self.param_grads)+1:])
+    
+        self.param_grads = converted_grads
+        self.properties = converted_props    
 
     def get_samples(self, length = 30, temp=1, *inps):
         if not hasattr(self, 'word_indxs'):

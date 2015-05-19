@@ -1172,10 +1172,10 @@ class RecurrentLayer(Layer):
                     fn = lambda tx, ty: self.step_fprop(tx, None, ty,
                                                         use_noise=use_noise,
                                                         no_noise_bias=no_noise_bias)
-
+        
         rval, updates = theano.scan(fn,
-                        sequences = inps,
-                        outputs_info = [init_state],
+                        sequences = [TT.unbroadcast(_inp, *range(_inp.ndim)) for _inp in inps],
+                        outputs_info = [TT.unbroadcast(init_state, *range(init_state.ndim))],
                         name='layer_%s'%self.name,
                         profile=self.profile,
                         truncate_gradient = truncate_gradient,
