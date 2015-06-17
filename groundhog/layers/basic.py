@@ -169,7 +169,13 @@ class Container(object):
         """
         Load the model.
         """
-        vals = numpy.load(filename)
+        file = None
+        if isinstance(filename, type("")):
+            file = open(filename, "rb")
+            vals = numpy.load(file)
+        else:
+            vals = numpy.load(filename)
+        
         for p in self.params:
             if p.name in vals:
                 logger.debug('Loading {} of {}'.format(p.name, p.get_value(borrow=True).shape))
@@ -184,6 +190,8 @@ class Container(object):
         unknown = set(vals.keys()) - {p.name for p in self.params}
         if len(unknown):
             logger.error("Unknown parameters {} given".format(unknown))
+        if file is not None:
+            file.close()
         
 class Layer(Container):
     """

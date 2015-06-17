@@ -279,6 +279,11 @@ class SR_Model(Model):
                     self.valid_extra_cost_names.extend(new_names)
                     normalize_costs.extend(normalize_costs)
                 
+                if search_layer.ali_dropout_rate:
+                    logger.debug('Replacing dropout in ali for validation')
+                    costs = theano.clone(costs, 
+                                         replace=search_layer.alignment_dropout_disable_replacements,
+                                         share_inputs=True)
                 
                 if hasattr(self.rnnencdec, 'clean_trans_x'):
                     #Dropout - replace trans_x with cleran_trans_x
